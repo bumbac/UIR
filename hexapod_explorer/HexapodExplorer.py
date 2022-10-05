@@ -110,20 +110,29 @@ class HexapodExplorer:
             print(rotation_matrix)
             free_line_coordinates = copy.deepcopy(laser_scan.distances)
 
+            # calculate pos of obstacle in beam and update free and occupied cells
             for i, beam in enumerate(laser_scan.distances):
+                # project the laser scan points to x,y plane with respect to the robot heading
                 angle = laser_scan.angle_min + i*laser_scan.angle_increment
                 x = beam * np.cos(angle)
                 y = beam * np.sin(angle)
                 z = 0
+                # compensate for the robot odometry
                 point = rotation_matrix @ [x, y, z] + [robot_position.x, robot_position.y, z]
                 position = Vector3(point[0], point[1], point[2])
+                # compensate for the map offset and resolution
                 coordinates = self.position_to_coordinates(position, origin, resolution)
-                free_line_coordinates[i] = self.bresenham_line((robot_coordinates[0], robot_coordinates[1]),
-                                                               (coordinates[0], coordinates[1]))
-                grid_map_update[coordinates[0]][coordinates[1]] = self.update_occupied(grid_map_update[coordinates[0]][coordinates[1]])
+                # raytrace individual scanned points
+                free_line_coordinates[i] = \
+                    self.bresenham_line((robot_coordinates[0], robot_coordinates[1]), (coordinates[0], coordinates[1]))
+                # update occupied (obstacle)
+                grid_map_update[coordinates[0]][coordinates[1]] = \
+                    self.update_occupied(grid_map_update[coordinates[0]][coordinates[1]])
+                # update free
                 for _, free_coord in enumerate(free_line_coordinates[i]):
                     x, y = free_coord
                     grid_map_update[x][y] = self.update_free(grid_map_update[x][y])
+            # return to 1d array
             grid_map_update_object.data = grid_map_update.flatten()
         return grid_map_update_object
 
