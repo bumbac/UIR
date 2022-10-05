@@ -100,7 +100,7 @@ class HexapodExplorer:
         print(odometry)
         print(laser_scan)
         if (grid_map is not None) and (odometry is not None) and (laser_scan is not None):
-            grid_map_update = grid_map.data.reshape(grid_map_update_object.height, grid_map_update_object.width)
+            grid_map_update = grid_map.data.reshape(grid_map_update_object.width, grid_map_update_object.height).T
 
             origin = grid_map.origin.position
             resolution = grid_map.resolution
@@ -133,6 +133,7 @@ class HexapodExplorer:
                     x, y = free_coord
                     grid_map_update[x][y] = self.update_free(grid_map_update[x][y])
             # return to 1d array
+            grid_map_update = grid_map_update.T
             grid_map_update_object.data = grid_map_update.flatten()
         return grid_map_update_object
 
