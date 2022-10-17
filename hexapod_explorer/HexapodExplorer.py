@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 import copy
 
 # import messages
-from messages import *
+import enum
+import queue
 
+import numpy as np
+from scipy.ndimage import distance_transform_edt as edt
+
+from messages import *
+from enum import Enum
 
 # cpg network
 # import cpg.oscilator_network as osc
+#
+
+
+def position_to_coordinates(position, origin, resolution):
+    x = np.floor((position.x - origin.x) / resolution)
+    y = np.floor((position.y - origin.y) / resolution)
+    z = np.floor((position.z - origin.y) / resolution)
+    return int(x), int(y), int(z)
+
 
 class HexapodExplorer:
 
@@ -22,7 +36,7 @@ class HexapodExplorer:
         Returns:
             p_mi: float64 - updated probability of the cell being occupied
         """
-        pz_occ = (1 + .95 - 0) / 2
+        pz_occ = (1 + .95) / 2
         pz_free = 1 - pz_occ
         Pmi_free = 1 - Pmi
         Pmi = (pz_occ*Pmi) / (pz_occ*Pmi + pz_free*Pmi_free)
@@ -37,8 +51,13 @@ class HexapodExplorer:
         Returns:
             p_mi: float64 - updated probability of the cell being occupied
         """
-        Pmi_occ = self.update_occupied(Pmi)
-        return 1 - Pmi_occ
+        pz_occ = (1 - .95) / 2
+        pz_free = 1 - pz_occ
+        Pmi_free = 1 - Pmi
+        Pmi = (pz_occ * Pmi) / (pz_occ * Pmi + pz_free * Pmi_free)
+        if Pmi == 0:
+            Pmi = 0.1
+        return Pmi
 
     def bresenham_line(self, start, goal):
         """Bresenham's line algorithm
@@ -78,12 +97,6 @@ class HexapodExplorer:
         y = goal[1]
         return line
 
-    def position_to_coordinates(self, position, origin, resolution):
-        x = np.floor((position.x - origin.x) / resolution)
-        y = np.floor((position.y - origin.y) / resolution)
-        z = np.floor((position.z - origin.y) / resolution)
-        return int(x), int(y), int(z)
-
 
     def fuse_laser_scan(self, grid_map, laser_scan, odometry):
         """ Method to fuse the laser scan data sampled by the robot with a given 
@@ -96,18 +109,14 @@ class HexapodExplorer:
             grid_map_update: OccupancyGrid - gridmap updated with the laser scan data
         """
         grid_map_update_object = copy.deepcopy(grid_map)
-        print(grid_map_update_object)
-        print(odometry)
-        print(laser_scan)
         if (grid_map is not None) and (odometry is not None) and (laser_scan is not None):
             grid_map_update = grid_map.data.reshape(grid_map_update_object.width, grid_map_update_object.height).T
 
             origin = grid_map.origin.position
             resolution = grid_map.resolution
             robot_position = odometry.pose.position
-            robot_coordinates = self.position_to_coordinates(robot_position, origin, resolution)
+            robot_coordinates = position_to_coordinates(robot_position, origin, resolution)
             rotation_matrix = odometry.pose.orientation.to_R()
-            print(rotation_matrix)
             free_line_coordinates = copy.deepcopy(laser_scan.distances)
 
             # calculate pos of obstacle in beam and update free and occupied cells
@@ -121,7 +130,7 @@ class HexapodExplorer:
                 point = rotation_matrix @ [x, y, z] + [robot_position.x, robot_position.y, z]
                 position = Vector3(point[0], point[1], point[2])
                 # compensate for the map offset and resolution
-                coordinates = self.position_to_coordinates(position, origin, resolution)
+                coordinates = position_to_coordinates(position, origin, resolution)
                 # raytrace individual scanned points
                 free_line_coordinates[i] = \
                     self.bresenham_line((robot_coordinates[0], robot_coordinates[1]), (coordinates[0], coordinates[1]))
@@ -137,7 +146,6 @@ class HexapodExplorer:
             grid_map_update_object.data = grid_map_update.flatten()
         return grid_map_update_object
 
-
     def find_free_edge_frontiers(self, grid_map):
         """Method to find the free-edge frontiers (edge clusters between the free and unknown areas)
         Args:
@@ -148,7 +156,6 @@ class HexapodExplorer:
 
         #TODO:[t1e_expl] find free-adges and cluster the frontiers
         return None 
-
 
     def find_inf_frontiers(self, grid_map):
         """Method to find the frontiers based on information theory approach
@@ -161,7 +168,6 @@ class HexapodExplorer:
         #TODO:[t1e_expl] find the information rich points in the environment
         return None
 
-
     def grow_obstacles(self, grid_map, robot_size):
         """ Method to grow the obstacles to take into account the robot embodiment
         Args:
@@ -169,12 +175,12 @@ class HexapodExplorer:
             robot_size: float - size of the robot
         Returns:
             grid_map_grow: OccupancyGrid - gridmap with considered robot body embodiment
-        """
-
+        # """
         grid_map_grow = copy.deepcopy(grid_map)
-
-        #TODO:[t1d-plan] grow the obstacles for robot_size
-
+        occupied_mask = np.ma.masked_where(grid_map_grow.data >= .5, grid_map_grow.data).mask
+        edt_a = edt(~occupied_mask)
+        proximity_mask = np.ma.masked_where(edt_a < (robot_size/grid_map.resolution), edt_a).mask
+        grid_map_grow.data = np.bitwise_or(proximity_mask, occupied_mask)
         return grid_map_grow
 
 
@@ -188,16 +194,110 @@ class HexapodExplorer:
             path: Path - path between the start and goal Pose on the map
         """
 
-        path = Path()
-        #add the start pose
-        path.poses.append(start)
-        
-        #TODO:[t1d-plan] plan the path between the start and the goal Pose
-        
-        #add the goal pose
-        path.poses.append(goal)
+        class STATE(enum.Enum):
+            FRESH = 0
+            OPEN = 1
+            CLOSED = 2
 
-        return path
+            def __repr__(self):
+                if self == STATE.FRESH:
+                    return "FRESH"
+                if self == STATE.OPEN:
+                    return "OPEN"
+                return "CLOSED"
+
+        class Node:
+            def __init__(self, position, goal_position, parent, occupied):
+                self.flag = STATE.FRESH
+                self.parent = parent
+                self.x = position.x
+                self.y = position.y
+                self.h = self.heuristic(goal_position)
+                self.price = float("inf")
+                self.occupied = occupied
+
+            def heuristic(self, other):
+                return np.abs(self.x - other.x) + np.abs(self.y - other.y)
+
+            def neighbours(self, width, height):
+                valid_coords = []
+                for x in [-1, 0, 1]:
+                    for y in [-1, 0, 1]:
+                        if 0 <= self.x + x < width and 0 <= self.y + y < height:
+                            if x == 0 and y == 0:
+                                continue
+                            valid_coords.append((self.x+x, self.y+y))
+                return valid_coords
+
+            def open(self, parent):
+                self.parent = parent
+                self.flag = STATE.OPEN
+                if parent is not None:
+                    if self.heuristic(parent) > 1:
+                        self.price = parent.price + 1.5
+                    else:
+                        self.price = parent.price + 1
+
+            def close(self):
+                self.flag = STATE.CLOSED
+
+            def get_Path(self, resolution=0.1):
+                path = Path()
+                path.poses.append(Pose(position=Vector3(self.x * resolution, self.y * resolution, 0)))
+                parent = self.parent
+                while parent is not None:
+                    path.poses.append(Pose(position=Vector3(parent.x * resolution, parent.y * resolution, 0)))
+                    parent = parent.parent
+                # path.poses = path.poses[::-1]
+                return path
+
+            def __repr__(self):
+                return f"{self.x=}, {self.y=}, {self.flag=}, {self.parent=}, {self.h=}, {self.occupied=}"
+
+            def __eq__(self, other):
+                return self.x == other.x and self.y == other.y
+
+            def same(self, other):
+                return (self.h + self.price) == (other.h + other.price)
+
+            def __lt__(self, other):
+                return (self.h + self.price) < (other.h + other.price)
+
+        if grid_map is None:
+            return None
+        start_coordinates = Vector3(int(start.position.x / grid_map.resolution),
+                                    int(start.position.y / grid_map.resolution), 0)
+        goal_coordinates = Vector3(int(goal.position.x / grid_map.resolution),
+                                   int(goal.position.y / grid_map.resolution), 0)
+        start_node = Node(start_coordinates, goal_coordinates, None, False)
+        goal_node = Node(goal_coordinates, goal_coordinates, None, False)
+        grid = [[start_node for _1 in range(grid_map.width)] for _ in range(grid_map.height)]
+        for x in range(grid_map.width):
+            for y in range(grid_map.height):
+                coordinates = Vector3(x, y, 0)
+                # IMPORTANT, grid_map is row major!
+                node = Node(coordinates, goal.position, None, grid_map.data[y][x])
+                grid[x][y] = node
+        q = queue.PriorityQueue()
+        start_node.price = 0
+        start_node.open(None)
+        q.put(start_node)
+        ctr = 100000
+        while not q.empty() and ctr > 0:
+            ctr -= 1
+            current_node = q.get()
+            if current_node == goal_node:
+                return current_node.get_Path(resolution=grid_map.resolution)
+            for coord in current_node.neighbours(grid_map.width, grid_map.height):
+                x, y = int(coord[0]), int(coord[1])
+                other_node = grid[x][y]
+                if not other_node.occupied:
+                    if other_node.flag != STATE.CLOSED:
+                        distance = current_node.heuristic(other_node)
+                        if (current_node.price + distance) < other_node.price:
+                            other_node.open(current_node)
+                            q.put(other_node)
+        return None
 
     def simplify_path(self, grid_map, path):
         """ Method to simplify the found path on the grid
@@ -210,17 +310,8 @@ class HexapodExplorer:
         if grid_map == None or path == None:
             return None
  
-        path_simplified = Path()
-        #add the start pose
-        path_simplified.poses.append(path.poses[0])
-        
-        #TODO:[t1d-plan] simplifie the planned path
-        
-        #add the goal pose
-        path_simplified.poses.append(path.poses[-1])
+        return path
 
-        return path_simplified
- 
     ###########################################################################
     #INCREMENTAL Planner
     ###########################################################################
