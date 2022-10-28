@@ -21,7 +21,7 @@ def position_to_coordinates(position, origin, resolution):
     x = np.floor((position.x - origin.x) / resolution)
     y = np.floor((position.y - origin.y) / resolution)
     z = np.floor((position.z - origin.y) / resolution)
-    return int(x), int(y), int(z)
+    return round(x), round(y), round(z)
 
 
 class HexapodExplorer:
@@ -67,8 +67,8 @@ class HexapodExplorer:
         Returns:
             interlying points between the start and goal coordinate
         """
-        (x0, y0) = start
-        (x1, y1) = goal
+        (x0, y0) = start[0], start[1]
+        (x1, y1) = goal[0], goal[1]
         line = []
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
@@ -96,7 +96,6 @@ class HexapodExplorer:
         x = goal[0]
         y = goal[1]
         return line
-
 
     def fuse_laser_scan(self, grid_map, laser_scan, odometry):
         """ Method to fuse the laser scan data sampled by the robot with a given 
@@ -234,7 +233,7 @@ class HexapodExplorer:
                 self.flag = STATE.OPEN
                 if parent is not None:
                     if self.heuristic(parent) > 1:
-                        self.price = parent.price + 1.5
+                        self.price = parent.price + np.sqrt(2)
                     else:
                         self.price = parent.price + 1
 
@@ -248,11 +247,12 @@ class HexapodExplorer:
                 while parent is not None:
                     path.poses.append(Pose(position=Vector3(parent.x * resolution, parent.y * resolution, 0)))
                     parent = parent.parent
-                # path.poses = path.poses[::-1]
+                path.poses = path.poses[::-1]
                 return path
 
             def __repr__(self):
-                return f"{self.x=}, {self.y=}, {self.flag=}, {self.parent=}, {self.h=}, {self.occupied=}"
+                return str(self.h)
+                # return f"{self.x=}, {self.y=}, {self.flag=}, {self.parent=}, {self.h=}, {self.occupied=}"
 
             def __eq__(self, other):
                 return self.x == other.x and self.y == other.y
@@ -265,10 +265,10 @@ class HexapodExplorer:
 
         if grid_map is None:
             return None
-        start_coordinates = Vector3(int(start.position.x / grid_map.resolution),
-                                    int(start.position.y / grid_map.resolution), 0)
-        goal_coordinates = Vector3(int(goal.position.x / grid_map.resolution),
-                                   int(goal.position.y / grid_map.resolution), 0)
+        start_coordinates = Vector3(round(start.position.x / grid_map.resolution),
+                                    round(start.position.y / grid_map.resolution), 0)
+        goal_coordinates = Vector3(round(goal.position.x / grid_map.resolution),
+                                   round(goal.position.y / grid_map.resolution), 0)
         start_node = Node(start_coordinates, goal_coordinates, None, False)
         goal_node = Node(goal_coordinates, goal_coordinates, None, False)
         grid = [[start_node for _1 in range(grid_map.width)] for _ in range(grid_map.height)]
@@ -282,18 +282,18 @@ class HexapodExplorer:
         start_node.price = 0
         start_node.open(None)
         q.put(start_node)
-        ctr = 100000
-        while not q.empty() and ctr > 0:
-            ctr -= 1
+        while not q.empty():
             current_node = q.get()
             if current_node == goal_node:
                 return current_node.get_Path(resolution=grid_map.resolution)
             for coord in current_node.neighbours(grid_map.width, grid_map.height):
-                x, y = int(coord[0]), int(coord[1])
+                x, y = round(coord[0]), round(coord[1])
                 other_node = grid[x][y]
                 if not other_node.occupied:
                     if other_node.flag != STATE.CLOSED:
                         distance = current_node.heuristic(other_node)
+                        if distance > 1:
+                            distance = np.sqrt(2)
                         if (current_node.price + distance) < other_node.price:
                             other_node.open(current_node)
                             q.put(other_node)
@@ -307,9 +307,38 @@ class HexapodExplorer:
         Returns:
             path_simple: Path - simplified path
         """
+        path = copy.deepcopy(path)
         if grid_map == None or path == None:
             return None
- 
+        it = 0
+        delta = 1
+        p = path.poses
+        new_path = [p[it]]
+        limit = len(p)
+        while True:
+            if it + delta >= limit:
+                break
+            else:
+                start = (p[it].position.x / grid_map.resolution, p[it].position.y / grid_map.resolution)
+                start = round(start[0]), round(start[1])
+                goal = (p[it+delta].position.x / grid_map.resolution, p[it+delta].position.y / grid_map.resolution)
+                goal = round(goal[0]), round(goal[1])
+                line = self.bresenham_line(start, goal)
+                obstacle = False
+                for i, point in enumerate(line):
+                    # IMPORTANT, inverted x and y
+                    y, x = round(point[0]), round(point[1])
+                    # occupied
+                    if grid_map.data[x][y]:
+                        obstacle = True
+                        new_path.append(p[it+delta-1])
+                        it += delta - 1
+                        delta = 1
+                        break
+                if not obstacle:
+                    delta += 1
+        new_path.append(p[-1])
+        path.poses = new_path
         return path
 
     ###########################################################################
