@@ -7,6 +7,7 @@ import enum
 import queue
 
 import numpy as np
+from matplotlib import pyplot as plt
 from scipy.ndimage import distance_transform_edt as edt
 
 from messages import *
@@ -22,6 +23,17 @@ def position_to_coordinates(position, origin, resolution):
     y = np.floor((position.y - origin.y) / resolution)
     z = np.floor((position.z - origin.y) / resolution)
     return round(x), round(y), round(z)
+
+
+def find_centroids(data, max_index):
+    x_coords = []
+    y_coords = []
+    for i in range(max_index):
+        indices = np.argwhere(data == i+1)
+        x, y = np.sum(indices, axis=0) / len(indices)
+        x_coords.append(x)
+        y_coords.append(y)
+    return x_coords, y_coords
 
 
 class HexapodExplorer:
@@ -145,28 +157,6 @@ class HexapodExplorer:
             grid_map_update_object.data = grid_map_update.flatten()
         return grid_map_update_object
 
-    def find_free_edge_frontiers(self, grid_map):
-        """Method to find the free-edge frontiers (edge clusters between the free and unknown areas)
-        Args:
-            grid_map: OccupancyGrid - gridmap of the environment
-        Returns:
-            pose_list: Pose[] - list of selected frontiers
-        """
-
-        #TODO:[t1e_expl] find free-adges and cluster the frontiers
-        return None 
-
-    def find_inf_frontiers(self, grid_map):
-        """Method to find the frontiers based on information theory approach
-        Args:
-            grid_map: OccupancyGrid - gridmap of the environment
-        Returns:
-            pose_list: Pose[] - list of selected frontiers
-        """
-
-        #TODO:[t1e_expl] find the information rich points in the environment
-        return None
-
     def grow_obstacles(self, grid_map, robot_size):
         """ Method to grow the obstacles to take into account the robot embodiment
         Args:
@@ -181,7 +171,6 @@ class HexapodExplorer:
         proximity_mask = np.ma.masked_where(edt_a < (robot_size/grid_map.resolution), edt_a).mask
         grid_map_grow.data = np.bitwise_or(proximity_mask, occupied_mask)
         return grid_map_grow
-
 
     def plan_path(self, grid_map, start, goal):
         """ Method to plan the path from start to the goal pose on the grid
@@ -340,6 +329,55 @@ class HexapodExplorer:
         new_path.append(p[-1])
         path.poses = new_path
         return path
+
+
+    def find_free_edge_frontiers(self, grid_map):
+        """Method to find the free-edge frontiers (edge clusters between the free and unknown areas)
+        Args:
+            grid_map: OccupancyGrid - gridmap of the environment
+        Returns:
+            pose_list: Pose[] - list of selected frontiers
+        """
+        import scipy.ndimage as ndimg
+        import skimage.measure as skm
+
+        a = -1
+        c = 10
+        mask = np.array([[a] * 3, [a, c, a], [a] * 3])
+        data = np.reshape(copy.deepcopy(grid_map.data), (grid_map.height, grid_map.width))
+        free_mask = (data < 0.5) * 1
+        free_free = ndimg.convolve(free_mask, mask, mode='constant', cval=0.0)
+        down_limit = (free_free > 1)
+        up_limit = (free_free < 10)
+        free_free = np.bitwise_and(down_limit, up_limit)
+        a = 1
+        c = 0
+        mask = np.array([[a] * 3, [a, c, a], [a] * 3])
+        data = np.reshape(copy.deepcopy(grid_map.data), (grid_map.height, grid_map.width))
+        unknown_mask = (data == 0.5) * 1
+        any_unknown = ndimg.convolve(unknown_mask, mask, mode='constant', cval=0.0)
+        any_unknown = (any_unknown > 0)
+        res = np.bitwise_and(any_unknown, free_free)
+        labeled_image, num_labels = skm.label(res, connectivity=2, return_num=True)
+        if num_labels < 1:
+            return None
+        centroids = find_centroids(labeled_image, num_labels)
+        free_edge_centroids = []
+        for i in range(len(centroids[0])):
+            y, x = centroids[0][i], centroids[1][i]
+            free_edge_centroids.append(Pose(position=Vector3(x * grid_map.resolution, y * grid_map.resolution, 0)))
+        return free_edge_centroids
+
+    def find_inf_frontiers(self, grid_map):
+        """Method to find the frontiers based on information theory approach
+        Args:
+            grid_map: OccupancyGrid - gridmap of the environment
+        Returns:
+            pose_list: Pose[] - list of selected frontiers
+        """
+
+        #TODO:[t1e_expl] find the information rich points in the environment
+        return None
 
     ###########################################################################
     #INCREMENTAL Planner
