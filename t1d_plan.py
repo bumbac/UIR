@@ -21,7 +21,7 @@ from messages import *
 #pickle
 import pickle
 
-ROBOT_SIZE = 0.3
+ROBOT_SIZE = 0.5
 
 
 if __name__=="__main__":
@@ -54,6 +54,7 @@ if __name__=="__main__":
 
         fig, ax = plt.subplots()
         gridmap.plot(ax)
+        gridmap_processed.plot(ax)
         plot_path(path, ax, 'r')
         plot_path(path_simple, ax, 'b')
         
