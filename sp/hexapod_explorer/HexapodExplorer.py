@@ -10,19 +10,19 @@ import queue
 import numpy as np
 import scipy.ndimage as ndimage
 import skimage.measure as skm
+from sklearn.cluster import KMeans
 
 from messages import *
 
 
-
 def position_to_coordinates(position, origin, resolution):
-    x = np.floor((position.x - origin.x) / resolution)
-    y = np.floor((position.y - origin.y) / resolution)
-    z = np.floor((position.z - origin.y) / resolution)
-    return round(x), round(y), round(z)
+    x = (position.x - origin.x) / resolution
+    y = (position.y - origin.y) / resolution
+    z = (position.z - origin.y) / resolution
+    return round(x), round(y)#, round(z)
 
 
-def find_centroids(data, max_index):
+def find_centroids(data, max_index, grid_map):
     x_coords = []
     y_coords = []
     for i in range(max_index):
@@ -30,7 +30,43 @@ def find_centroids(data, max_index):
         x, y = np.sum(indices, axis=0) / len(indices)
         x_coords.append(x)
         y_coords.append(y)
-    return x_coords, y_coords
+    free_edge_centroids = []
+    origin_x = grid_map.origin.position.x
+    origin_y = grid_map.origin.position.y
+    for y, x in zip(x_coords, y_coords):
+        x_ = x * grid_map.resolution + origin_x
+        y_ = y * grid_map.resolution + origin_y
+        free_edge_centroids.append(Pose(position=Vector3(x_, y_, 0)))
+    return free_edge_centroids
+
+
+def find_clusters(data, max_index, grid_map, laser_scan):
+    f = len(data)
+    # D = laser_scan.angle_min
+    D = 10
+    nr = 1 + round(np.floor(f / D + 0.5))
+    kmeans = KMeans(n_clusters=1)
+    centroids = []
+    for i in range(max_index):
+        indices = np.argwhere(data == i + 1)
+        j = 0
+        while j + nr < len(indices):
+            cluster = indices[j:j+nr]
+            model = kmeans.fit(cluster)
+            centroids.append(model.cluster_centers_[0])
+            j += nr
+        if j < len(indices):
+            cluster = indices[j:]
+            model = kmeans.fit(cluster)
+            centroids.append(model.cluster_centers_[0])
+    multiple_representative_centroids = []
+    origin_x = grid_map.origin.position.x
+    origin_y = grid_map.origin.position.y
+    for coord in centroids:
+        x_ = coord[1] * grid_map.resolution + origin_x
+        y_ = coord[0] * grid_map.resolution + origin_y
+        multiple_representative_centroids.append(Pose(position=Vector3(x_, y_, 0)))
+    return multiple_representative_centroids
 
 
 class HexapodExplorer:
@@ -49,8 +85,8 @@ class HexapodExplorer:
         pz_free = 1 - pz_occ
         Pmi_free = 1 - Pmi
         Pmi = (pz_occ*Pmi) / (pz_occ*Pmi + pz_free*Pmi_free)
-        if Pmi == 1:
-            Pmi = 0.9
+        if Pmi > 0.95:
+            Pmi = 0.95
         return Pmi
 
     def update_free(self, Pmi):
@@ -64,8 +100,8 @@ class HexapodExplorer:
         pz_free = 1 - pz_occ
         Pmi_free = 1 - Pmi
         Pmi = (pz_occ * Pmi) / (pz_occ * Pmi + pz_free * Pmi_free)
-        if Pmi == 0:
-            Pmi = 0.1
+        if Pmi < 0.05:
+            Pmi = 0.05
         return Pmi
 
     def bresenham_line(self, start, goal):
@@ -118,8 +154,7 @@ class HexapodExplorer:
         """
         grid_map_update_object = copy.deepcopy(grid_map)
         if (grid_map is not None) and (odometry is not None) and (laser_scan is not None):
-            grid_map_update = grid_map.data.reshape(grid_map_update_object.width, grid_map_update_object.height).T
-
+            grid_map_update = grid_map_update_object.data.T
             origin = grid_map.origin.position
             resolution = grid_map.resolution
             robot_position = odometry.pose.position
@@ -141,17 +176,16 @@ class HexapodExplorer:
                 coordinates = position_to_coordinates(position, origin, resolution)
                 # raytrace individual scanned points
                 free_line_coordinates[i] = \
-                    self.bresenham_line((robot_coordinates[0], robot_coordinates[1]), (coordinates[0], coordinates[1]))
+                    self.bresenham_line(robot_coordinates, coordinates)
                 # update occupied (obstacle)
-                grid_map_update[coordinates[0]][coordinates[1]] = \
-                    self.update_occupied(grid_map_update[coordinates[0]][coordinates[1]])
+                grid_map_update[coordinates] = \
+                    self.update_occupied(grid_map_update[coordinates])
                 # update free
                 for _, free_coord in enumerate(free_line_coordinates[i]):
                     x, y = free_coord
                     grid_map_update[x][y] = self.update_free(grid_map_update[x][y])
             # return to 1d array
-            grid_map_update = grid_map_update.T
-            grid_map_update_object.data = grid_map_update
+            grid_map_update_object.data = grid_map_update.T
         return grid_map_update_object
 
     def grow_obstacles(self, grid_map, robot_size):
@@ -210,8 +244,7 @@ class HexapodExplorer:
                 return np.abs(self.x - other.x) + np.abs(self.y - other.y)
 
             def norm(self, other):
-                dist = np.sqrt((self.x - other.x) ** 2 + (self.y - other.y) ** 2)
-                return dist
+                return np.linalg.norm([self.x - other.x, self.y - other.y])
 
             def neighbours(self, grid_map):
                 width, height = grid_map.width, grid_map.height
@@ -256,9 +289,7 @@ class HexapodExplorer:
                 return f"{self.x=}, {self.y=}, {self.flag=}, {self.parent=}, {self.h=}, {self.occupied=}"
 
             def __eq__(self, other):
-                if self.norm(other) <= (3 * robot_size / grid_map.resolution):
-                    return True
-                return False
+                return self.norm(other) <= (robot_size / grid_map.resolution)
 
             def same(self, other):
                 return (self.h + self.price) == (other.h + other.price)
@@ -275,21 +306,37 @@ class HexapodExplorer:
         grid = [[] for _ in range(grid_map.width)]
         for x in range(grid_map.width):
             for y in range(grid_map.height):
-                translated_x = grid_map.origin.position.x / grid_map.resolution + x
-                translated_y = grid_map.origin.position.y / grid_map.resolution + y
-                coordinates = Vector3(translated_x, translated_y, 0)
+                coordinates = Vector3(
+                    round(grid_map.origin.position.x / grid_map.resolution + x),
+                    round(grid_map.origin.position.y / grid_map.resolution + y), 0)
                 # IMPORTANT, grid_map is row major!
                 node = Node(coordinates, goal.position, None, grid_map.data[y][x])
                 grid[x].append(node)
 
+        start_x = round(start.position.x / grid_map.resolution + grid_map.width // 2)
+        start_y = round(start.position.y / grid_map.resolution + grid_map.height // 2)
+        diameter = round(robot_size / grid_map.resolution)
+        for i in range(-diameter, diameter):
+            for j in range(-diameter, diameter):
+                grid[start_x+i][start_y].occupied = False
+                grid[start_x + i][start_y + j].occupied = False
+                grid[start_x][start_y + j].occupied = False
+
+        goal_x = goal.position.x / grid_map.resolution + grid_map.width // 2
+        goal_y = goal.position.y / grid_map.resolution + grid_map.height // 2
+        goal_occupied = grid[round(goal_x)][round(goal_y)]
         q = queue.PriorityQueue()
         start_node.price = 0
         start_node.open(None)
         q.put(start_node)
-        current_node = 0
-
+        fallback_node = [float("inf"), None]
         while not q.empty():
             current_node = q.get()
+            if current_node.norm(goal_node) < fallback_node[0]:
+                fallback_node = [current_node.norm(goal_node), current_node]
+            if current_node.norm(goal_node) < (2 * robot_size / grid_map.resolution) and goal_occupied:
+                print("SUCCESS OCCUPIED")
+                return True, current_node.get_Path(resolution=grid_map.resolution)
             if current_node == goal_node:
                 print("SUCCESS")
                 return True, current_node.get_Path(resolution=grid_map.resolution)
@@ -298,13 +345,30 @@ class HexapodExplorer:
                 other_node = grid[x][y]
                 if not other_node.occupied:
                     if other_node.flag != STATE.CLOSED:
-                        distance = current_node.heuristic(other_node)
-                        if distance > 1:
-                            distance = np.sqrt(2)
+                        distance = current_node.norm(other_node)
                         if (current_node.price + distance) < other_node.price:
                             other_node.open(current_node)
                             q.put(other_node)
-        return False, current_node.get_Path(resolution=grid_map.resolution)
+        print("Graph plan fallback.")
+        # fallback
+        if fallback_node[1]:
+            print(fallback_node[0], goal_node.x, goal_node.y)
+            return False, fallback_node[1].get_Path(resolution=grid_map.resolution)
+        else:
+            # failure, stay in place
+            return False, start_node.get_Path(grid_map.resolution)
+
+    def relax_goal_accessibility(self, grid_map, path):
+        it = len(path.poses) - 1
+        while it > -1:
+            pos = path.poses[it]
+            pos = pos.position
+            x = round(pos.x / grid_map.resolution + grid_map.width // 2)
+            y = round(pos.y / grid_map.resolution + grid_map.height // 2)
+            if grid_map.data[y][x]:
+                grid_map.data[y][x] = False
+            it -= 1
+        return grid_map
 
     def simplify_path(self, grid_map, path):
         """ Method to simplify the found path on the grid
@@ -316,12 +380,15 @@ class HexapodExplorer:
         """
         if grid_map is None or path is None:
             return None
+        p = path.poses
+        if len(p) == 0:
+            return path
         path = copy.deepcopy(path)
+        limit = len(p)
         it = 0
         delta = 1
-        p = path.poses
         new_path = [p[it]]
-        limit = len(p)
+        grid_map = self.relax_goal_accessibility(grid_map, path)
         while True:
             if it + delta >= limit:
                 break
@@ -348,15 +415,15 @@ class HexapodExplorer:
         path.poses = new_path
         return path
 
-
-    def find_free_edge_frontiers(self, grid_map):
+    def find_free_edge_frontiers(self, grid_map, laser_scan, multiple=True):
         """Method to find the free-edge frontiers (edge clusters between the free and unknown areas)
         Args:
             grid_map: OccupancyGrid - gridmap of the environment
+            laser_scan: Laser Scan - many variables
         Returns:
             pose_list: Pose[] - list of selected frontiers
         """
-        if not grid_map:
+        if not grid_map or not laser_scan:
             return None
 
         a = -1
@@ -379,15 +446,11 @@ class HexapodExplorer:
         labeled_image, num_labels = skm.label(res, connectivity=2, return_num=True)
         if num_labels < 1:
             return None
-        centroids = find_centroids(labeled_image, num_labels)
-        free_edge_centroids = []
-        origin_x = grid_map.origin.position.x
-        origin_y = grid_map.origin.position.y
-        for i in range(len(centroids[0])):
-            y, x = centroids[0][i], centroids[1][i]
-            free_edge_centroids.append(Pose(position=Vector3(x * grid_map.resolution + origin_x, y * grid_map.resolution
-                                                             + origin_y, 0)))
-        return free_edge_centroids
+
+        if multiple:
+            return find_clusters(labeled_image, num_labels, grid_map, laser_scan)
+        else:
+            return find_centroids(labeled_image, num_labels, grid_map)
 
     def find_inf_frontiers(self, grid_map):
         """Method to find the frontiers based on information theory approach

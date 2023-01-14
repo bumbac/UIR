@@ -5,7 +5,7 @@ import math
 import numpy as np
 from messages import *
 
-DELTA_DISTANCE = 0.1
+DELTA_DISTANCE = 0.2
 C_TURNING_SPEED = 5
 C_AVOID_SPEED = 10
 
@@ -68,7 +68,7 @@ class HexapodController:
                 return cmd_msg
             diff = goal.position - odometry.pose.position
             linear_speed = diff.norm()
-            if linear_speed < DELTA_DISTANCE:
+            if linear_speed <= DELTA_DISTANCE:
                 return None
             goal_h = np.arctan2(diff.y, diff.x)
             robot_h = odometry.pose.orientation.to_Euler()[0]

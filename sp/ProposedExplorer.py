@@ -19,6 +19,9 @@ import HexapodExplorer
 from messages import *
 
 
+def p(num, places=1):
+    return f'{num:.2f}'
+
 class Explorer:
     """ Class to represent an exploration agent
     """
@@ -35,19 +38,21 @@ class Explorer:
         gridmap.origin = Pose(Vector3(-5.0, -5.0, 0.0), Quaternion(1, 0, 0, 0))
         gridmap.data = 0.5 * np.ones((gridmap.height, gridmap.width))
         self.gridmap = gridmap
-        self.robot_size = 0.1
+        self.robot_size = 0.5
         # current frontiers
         self.frontiers = None
         # current path
         self.path = Path()
         # trajectory
         self.trajectory = None
+        self.path_to_go = None
         # stopping condition
         self.stop = False
         # timing delays
-        self.timing = {"mapping": 5,
-                       "planning": 10,
-                       "trajectory_following": 3}
+        self.timing = {"mapping": 1,
+                       "planning": 20,
+                       "trajectory_following": 1,
+                       "graph": 10}
 
 
         """Connecting the simulator
@@ -99,7 +104,7 @@ class Explorer:
         """
         while not self.stop:
             time.sleep(self.timing["mapping"])
-            print("mapping continue")
+            # print("mapping continue")
             # fuse the laser scan
             laser_scan = self.robot.laser_scan_
             odometry = self.robot.odometry_
@@ -108,72 +113,89 @@ class Explorer:
     def planning(self):
         """ Planning thread that takes the constructed gridmap, find frontiers, and select the next goal with the navigation path
         """
-        sufficient_trajectory_poses_n = 1
         while not self.stop:
-            if self.trajectory:
-                if len(self.trajectory.poses) >= sufficient_trajectory_poses_n:
-                    time.sleep(self.timing["planning"])
-                    print("planning continue")
-            else:
-                print("finding plan")
-                time.sleep(5)
+            print("Finding new plan.")
             # obstacle growing
             gridmap_processed = self.explor.grow_obstacles(self.gridmap, self.robot_size)
             # frontier calculation
-            self.frontiers = self.explor.find_free_edge_frontiers(self.gridmap)
-            # goal selection
-            start = None
-            odometry = self.robot.odometry_
-            if odometry:
-                start = odometry.pose
-            # path planning
-            if self.frontiers:
-                sorted_frontiers = self.closest_frontier(self.frontiers, gridmap_processed)
-                path_planning_limit = 5
-                frontier_idx = 1
-                while frontier_idx < path_planning_limit and frontier_idx < len(sorted_frontiers):
-                    goal, goal_dist = sorted_frontiers[frontier_idx]
-                    if self.frontier_occupied(goal, gridmap_processed):
-                        path_planning_limit += 1
-                        frontier_idx += 1
-                        print("Frontier goal not accessible.")
-                        continue
-                    flag, path_to_go = self.explor.plan_path(gridmap_processed, start, goal, self.robot_size)
-                    print(flag, goal_dist)
-                    if path_to_go:
-                        self.trajectory = self.explor.simplify_path(gridmap_processed, path_to_go)
-                        print(*[(int(a.position.x), int(a.position.y)) for a in self.trajectory.poses])
-                        break
-                    else:
-                        frontier_idx += 1
+            # self.frontiers = self.explor.find_free_edge_frontiers(self.gridmap, self.robot.laser_scan_, multiple=False)
+            self.frontiers = self.explor.find_free_edge_frontiers(self.gridmap, self.robot.laser_scan_, multiple=True)
+            self.closest_frontier(gridmap_processed)
+            # new plan found
+            if self.trajectory:
+                if len(self.trajectory.poses) > 0 or self.robot.navigation_goal:
+                    time.sleep(self.timing["planning"])
+            # try to find new plan
+            else:
+                time.sleep(1)
 
     def trajectory_following(self):
         """trajectory following thread that assigns new goals to the robot navigation thread
         """
-        prev_navigation_goal = self.robot.navigation_goal
         while not self.stop:
-            time.sleep(self.timing["trajectory_following"])
-            if self.close_enough():
+            # reached goal and need a new one
+            if not self.robot.navigation_goal:
+                # move to next goal
+                prev_navigation_goal = self.next_navigation_goal()
                 if prev_navigation_goal:
-                    print("reached navigation_goal: ", int(prev_navigation_goal.position.x), int(prev_navigation_goal.position.y))
-                if self.trajectory:
-                    if len(self.trajectory.poses) > 0:
-                        goal = self.trajectory.poses.pop(0)
-                        prev_navigation_goal = goal
-                        # goto_reactive sets robot.navigation_goal
-                        self.robot.goto_reactive(goal)
-            else:
-                pass
-                # print(self.robot.odometry_.pose.position.x,
-                #       self.robot.odometry_.pose.position.y,
-                #       self.robot.navigation_goal.position.x,
-                #       self.robot.navigation_goal.position.y)
+                    print("Reached navigation_goal: ",
+                          p(prev_navigation_goal.position.x), p(prev_navigation_goal.position.y))
             odometry = self.robot.odometry_
             if odometry:
                 self.path.poses.append(odometry.pose)
+            time.sleep(self.timing["trajectory_following"])
+
+    def next_navigation_goal(self):
+        prev_navigation_goal = self.robot.navigation_goal
+        if self.trajectory:
+            if len(self.trajectory.poses) > 0:
+                self.robot.navigation_goal = self.trajectory.poses.pop(0)
+        return prev_navigation_goal
+
+    def closest_frontier(self, gridmap_processed):
+        if not self.robot.odometry_ or not self.frontiers:
+            return
+        start = self.robot.odometry_.pose
+        position = start.position
+        f = []
+        for a in self.frontiers:
+            goal = a.position
+            f.append(np.linalg.norm([goal.x - position.x, goal.y - position.y]))
+        sorted_frontiers = sorted([(self.frontiers[i], d) for i, d in enumerate(f)], key=lambda frontier: frontier[1])
+        # goal selection
+        print("Frontiers found.")
+        frontier_idx = 0
+        while frontier_idx < len(sorted_frontiers):
+            goal, goal_dist = sorted_frontiers[frontier_idx]
+            frontier_idx += 1
+            # second argument allows fallback
+            if goal_dist <= 3 * self.robot_size and frontier_idx < len(sorted_frontiers):
+                print("TOO CLOSE",
+                      p(goal_dist), p(goal.position.x), p(goal.position.y), frontier_idx)
+                continue
+            # path planning
+            flag, path_to_go = self.explor.plan_path(gridmap_processed, start, goal, self.robot_size)
+            # print(frontier_idx, "Path found:", flag)
+            print("Plan found, goal:", p(goal.position.x), p(goal.position.y), goal_dist)
+            self.path_to_go = path_to_go
+            self.trajectory = self.explor.simplify_path(gridmap_processed, path_to_go)
+            self.trajectory.poses.pop(0)
+            print("Trajectory:", p(start.position.x), p(start.position.y), "\n",
+                  *[(p(a.position.x), p(a.position.y)) for a in self.trajectory.poses])
+            self.next_navigation_goal()
+            break
+
+    def frontier_occupied(self, goal, gridmap_processed):
+        x, y = goal.position.x, goal.position.y
+        print("\t\t", x, y)
+        x = x / gridmap_processed.resolution + (gridmap_processed.width // 2)
+        y = y / gridmap_processed.resolution + (gridmap_processed.height // 2)
+        x, y = round(x), round(y)
+        print("\t\t", x, y)
+        return gridmap_processed.data[y][x]
 
     def close_enough(self):
-        LIM = 3 * self.robot_size
+        LIM = self.robot_size
         if self.robot.odometry_:
             if self.robot.navigation_goal:
                 dist = self.robot.odometry_.pose.dist(self.robot.navigation_goal)
@@ -185,29 +207,6 @@ class Explorer:
             print("NO GOAL")
             return True
         return False
-
-
-    def closest_frontier(self, frontiers, gridmap_processed):
-        if not self.robot.odometry_ or not frontiers:
-            return None, None
-        position = self.robot.odometry_.pose.position
-        f = []
-        for a in frontiers:
-            goal = a.position
-            f.append(np.linalg.norm([goal.x - position.x, goal.y - position.y]))
-        sorted_frontiers = sorted([(frontiers[i], d) for i, d in enumerate(f)], key=lambda frontier: frontier[1])
-        return sorted_frontiers
-
-    def frontier_occupied(self, goal, gridmap_processed):
-        x, y = goal.position.x, goal.position.y
-        print("\t\t", x, y)
-        x = x / gridmap_processed.resolution + (gridmap_processed.width // 2)
-        y = y / gridmap_processed.resolution + (gridmap_processed.height // 2)
-        x, y = round(x), round(y)
-        print("\t\t", x, y)
-        return gridmap_processed.data[y][x]
-
-
 
 if __name__ == "__main__":
     # instantiate the robot
@@ -230,17 +229,18 @@ if __name__ == "__main__":
         if ex0.frontiers is not None:
             x = [f.position.x for f in ex0.frontiers]
             y = [f.position.y for f in ex0.frontiers]
-            ax.plot(x, y, "ro")
+            ax.plot(x, y, "yo")
 
-        if ex0.trajectory is not None:
-            x = [f.position.x for f in ex0.trajectory.poses]
-            y = [f.position.y for f in ex0.trajectory.poses]
+        if ex0.path_to_go is not None:
+            x = [f.position.x for f in ex0.path_to_go.poses]
+            y = [f.position.y for f in ex0.path_to_go.poses]
             ax.plot(x, y, "b.")
+
 
         plt.xlabel('x[m]')
         plt.ylabel('y[m]')
         ax.set_aspect('equal', 'box')
         plt.show()
         # to throttle the plotting pause for 1s
-        plt.pause(5)
+        plt.pause(ex0.timing["graph"])
         plt.close()
