@@ -43,7 +43,7 @@ def find_centroids(data, max_index, grid_map):
 def find_clusters(data, max_index, grid_map, laser_scan):
     f = len(data)
     # D = laser_scan.angle_min
-    D = 10
+    D = 5
     nr = 1 + round(np.floor(f / D + 0.5))
     kmeans = KMeans(n_clusters=1)
     centroids = []
@@ -330,16 +330,13 @@ class HexapodExplorer:
         start_node.open(None)
         q.put(start_node)
         fallback_node = [float("inf"), None]
+        OBSTACLE_SIZE_LIMIT = 1.5 * robot_size / grid_map.resolution
         while not q.empty():
             current_node = q.get()
             if current_node.norm(goal_node) < fallback_node[0]:
                 fallback_node = [current_node.norm(goal_node), current_node]
-            if current_node.norm(goal_node) < (2 * robot_size / grid_map.resolution) and goal_occupied:
-                print("SUCCESS OCCUPIED")
-                return True, current_node.get_Path(resolution=grid_map.resolution)
-            if current_node == goal_node:
-                print("SUCCESS")
-                return True, current_node.get_Path(resolution=grid_map.resolution)
+            if current_node.norm(goal_node) < OBSTACLE_SIZE_LIMIT and goal_occupied:
+                return True, current_node.get_Path(resolution=grid_map.resolution), current_node.price
             for coord in current_node.neighbours(grid_map):
                 x, y = round(coord[0]) + (grid_map.width // 2), round(coord[1]) + (grid_map.height // 2)
                 other_node = grid[x][y]
@@ -349,14 +346,8 @@ class HexapodExplorer:
                         if (current_node.price + distance) < other_node.price:
                             other_node.open(current_node)
                             q.put(other_node)
-        print("Graph plan fallback.")
         # fallback
-        if fallback_node[1]:
-            print(fallback_node[0], goal_node.x, goal_node.y)
-            return False, fallback_node[1].get_Path(resolution=grid_map.resolution)
-        else:
-            # failure, stay in place
-            return False, start_node.get_Path(grid_map.resolution)
+        return False, fallback_node[1].get_Path(resolution=grid_map.resolution), fallback_node[1].price
 
     def relax_goal_accessibility(self, grid_map, path):
         it = len(path.poses) - 1

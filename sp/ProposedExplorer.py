@@ -52,8 +52,7 @@ class Explorer:
         self.timing = {"mapping": 1,
                        "planning": 20,
                        "trajectory_following": 1,
-                       "graph": 10}
-
+                       "graph": 5}
 
         """Connecting the simulator
         """
@@ -104,7 +103,6 @@ class Explorer:
         """
         while not self.stop:
             time.sleep(self.timing["mapping"])
-            # print("mapping continue")
             # fuse the laser scan
             laser_scan = self.robot.laser_scan_
             odometry = self.robot.odometry_
@@ -120,7 +118,14 @@ class Explorer:
             # frontier calculation
             # self.frontiers = self.explor.find_free_edge_frontiers(self.gridmap, self.robot.laser_scan_, multiple=False)
             self.frontiers = self.explor.find_free_edge_frontiers(self.gridmap, self.robot.laser_scan_, multiple=True)
-            self.closest_frontier(gridmap_processed)
+
+            # sorted_frontiers = self.closest_frontier(gridmap_processed)
+            sorted_frontiers = self.richest_frontier(gridmap_processed)
+            print("mutual\n\n")
+
+            # plan path
+            self.plan_path(gridmap_processed, sorted_frontiers)
+
             # new plan found
             if self.trajectory:
                 if len(self.trajectory.poses) > 0 or self.robot.navigation_goal:
@@ -152,61 +157,78 @@ class Explorer:
                 self.robot.navigation_goal = self.trajectory.poses.pop(0)
         return prev_navigation_goal
 
+    def circle_I(self, center, I_matrix):
+        R = int(self.robot.laser_scan_.range_max)
+        cx = round(center.x / self.gridmap.resolution) + self.gridmap.width // 2
+        cy = round(center.y / self.gridmap.resolution) + self.gridmap.height // 2
+        gain = 0
+        for x in range(-R, R):
+            Y = int((R**2 - (x)**2)**0.5)
+            for y in range(-Y, Y+1):
+                point = x+cx, y+cy
+                if 0 <= point[0] < self.gridmap.width and 0 <= point[1] < self.gridmap.height:
+                    gain += I_matrix[point]
+        return gain
+
+    def richest_frontier(self, gridmap_processed):
+        if not self.robot.odometry_ or not self.frontiers or not gridmap_processed:
+            return
+        p_function = np.vectorize(lambda p: p * np.log(p))
+        one_p_function = np.vectorize(lambda p:  (1-p) * np.log((1-p)))
+        I_matrix = p_function(self.gridmap.data) + one_p_function(self.gridmap.data)
+        I_matrix = -1 * I_matrix
+        path_goal_metric = []
+        for goal in self.frontiers:
+            I = self.circle_I(goal.position, I_matrix)
+            path_goal_metric.append((None, goal, I))
+        sorted_frontiers = sorted(path_goal_metric, key=lambda frontier: frontier[2])
+        goal_idx = 0
+        while goal_idx < len(sorted_frontiers):
+            path, goal, metric = sorted_frontiers[goal_idx]
+            success, path_to_go, dist = self.explor.plan_path(gridmap_processed, self.robot.odometry_.pose, goal,
+                                                              self.robot_size)
+            if success:
+                sorted_frontiers[goal_idx] = (path_to_go, goal, dist)
+                print("Mutual plan found, goal:", p(goal.position.x), p(goal.position.y), dist)
+                break
+            goal_idx += 1
+        return sorted_frontiers
+
     def closest_frontier(self, gridmap_processed):
         if not self.robot.odometry_ or not self.frontiers:
             return
         start = self.robot.odometry_.pose
-        position = start.position
-        f = []
-        for a in self.frontiers:
-            goal = a.position
-            f.append(np.linalg.norm([goal.x - position.x, goal.y - position.y]))
-        sorted_frontiers = sorted([(self.frontiers[i], d) for i, d in enumerate(f)], key=lambda frontier: frontier[1])
-        # goal selection
-        print("Frontiers found.")
+        path_goal_dist = []
         frontier_idx = 0
-        while frontier_idx < len(sorted_frontiers):
-            goal, goal_dist = sorted_frontiers[frontier_idx]
+        for goal in self.frontiers:
+            success, path_to_go, dist = self.explor.plan_path(gridmap_processed, start, goal, self.robot_size)
+            if success:
+                path_goal_dist.append((path_to_go, goal, dist))
             frontier_idx += 1
-            # second argument allows fallback
-            if goal_dist <= 3 * self.robot_size and frontier_idx < len(sorted_frontiers):
-                print("TOO CLOSE",
-                      p(goal_dist), p(goal.position.x), p(goal.position.y), frontier_idx)
-                continue
-            # path planning
-            flag, path_to_go = self.explor.plan_path(gridmap_processed, start, goal, self.robot_size)
-            # print(frontier_idx, "Path found:", flag)
-            print("Plan found, goal:", p(goal.position.x), p(goal.position.y), goal_dist)
-            self.path_to_go = path_to_go
-            self.trajectory = self.explor.simplify_path(gridmap_processed, path_to_go)
-            self.trajectory.poses.pop(0)
-            print("Trajectory:", p(start.position.x), p(start.position.y), "\n",
-                  *[(p(a.position.x), p(a.position.y)) for a in self.trajectory.poses])
-            self.next_navigation_goal()
-            break
+        sorted_frontiers = sorted(path_goal_dist, key=lambda frontier: frontier[2])
+        path_to_go, goal, dist = sorted_frontiers[0]
+        print("Closest plan found, goal:", p(goal.position.x), p(goal.position.y), dist)
+        return sorted_frontiers
 
-    def frontier_occupied(self, goal, gridmap_processed):
-        x, y = goal.position.x, goal.position.y
-        print("\t\t", x, y)
-        x = x / gridmap_processed.resolution + (gridmap_processed.width // 2)
-        y = y / gridmap_processed.resolution + (gridmap_processed.height // 2)
-        x, y = round(x), round(y)
-        print("\t\t", x, y)
-        return gridmap_processed.data[y][x]
-
-    def close_enough(self):
-        LIM = self.robot_size
-        if self.robot.odometry_:
-            if self.robot.navigation_goal:
-                dist = self.robot.odometry_.pose.dist(self.robot.navigation_goal)
-                if dist <= LIM:
-                    print("CLOSE ENOUGH", dist)
-                    return True
-                else:
-                    return False
-            print("NO GOAL")
-            return True
-        return False
+    def plan_path(self, gridmap_processed, sorted_frontiers):
+        if not sorted_frontiers:
+            return
+        path_to_go, goal, metric = sorted_frontiers[0]
+        idx = 0
+        while not path_to_go and idx < len(sorted_frontiers):
+            path_to_go, goal, metric = sorted_frontiers[idx]
+            idx += 1
+        print("Plan found, goal:", p(goal.position.x), p(goal.position.y), metric)
+        # all navigation goals without simplification
+        self.path_to_go = path_to_go
+        # Simplified plans, minimum navigation goals
+        self.trajectory = self.explor.simplify_path(gridmap_processed, path_to_go)
+        # Plan starts with current location, pop it
+        self.trajectory.poses.pop(0)
+        start = self.robot.odometry_.pose
+        print("Trajectory:", p(start.position.x), p(start.position.y), "\n",
+              *[(p(a.position.x), p(a.position.y)) for a in self.trajectory.poses])
+        self.next_navigation_goal()
 
 if __name__ == "__main__":
     # instantiate the robot
