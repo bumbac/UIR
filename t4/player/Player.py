@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+import copy
 import time
 import random
 import numpy as np
@@ -18,141 +18,9 @@ GREEDY = "GREEDY"
 MONTE_CARLO = "MONTE_CARLO"
 VALUE_ITERATION = "VALUE_ITERATION"
 
-
-def compute_nash(matrix, only_value=False, minimize=False):
-    """
-    Method to calculate the value-iteration policy action
-
-    Parameters
-    ----------
-    matrix: n times m array of floats
-        Game utility matrix
-
-    Returns
-    -------
-    value:float
-        computed value of the game
-    strategy:float[n]
-        probability of player 1 playing each action in nash equilibrium
-    """
-    if minimize:
-        matrix = -1 * matrix.T
-    # compute Nash Equilibrium
-    model = g.Model()
-    model.setParam("OutputFlag", 0)
-    U = model.addVar(name="U")
-    # M is number of rows == evaders positions
-    # N is number of columns == pursuers positions
-    M, N = matrix.shape
-    path_vars = []
-    for i in range(M):
-        path_vars.append(model.addVar(lb=0, ub=1.0, vtype=g.GRB.CONTINUOUS, name="Path " + str(i)))
-    model.setObjective(U, g.GRB.MAXIMIZE)
-    for j in range(N):
-        model.addConstr(g.quicksum(
-            [matrix[i, j] * path_vars[i] for i in range(M)]
-        ) >= U, "cons1")
-    model.addConstr(g.quicksum(path_vars) == 1, "cons2")
-    for pv in path_vars:
-        model.addConstr(pv >= 0, "cons3")
-    model.optimize()
-    strategy = [var.X for var in path_vars]
-    game_value = 0
-    return game_value, strategy
-
+GAMMA = 0.95
 
 class Player:
-    def create_mapping(self, gridmap, evaders, pursuers):
-        i2c = []
-        c2i = {}
-        ctr = 0
-        dimensions = []
-        EA = []
-        PA = []
-        for evader in evaders:
-            neighbors = list(filter(gridmap.passable, gridmap.neighbors4(evader)))
-            EA.append(neighbors)
-            dimensions.append(len(neighbors))
-            i2c.extend(neighbors)
-            for i, pos in enumerate(neighbors):
-                c2i[pos] = ctr
-                ctr += 1
-        for pursuer in pursuers:
-            neighbors = list(filter(gridmap.passable, gridmap.neighbors4(pursuer)))
-            PA.append(neighbors)
-            dimensions.append(len(neighbors))
-            i2c.extend(neighbors)
-            for i, pos in enumerate(neighbors):
-                c2i[pos] = ctr
-                ctr += 1
-        return i2c, c2i, EA, PA
-
-    def compute_vi(self, gridmap, evaders, pursuers):
-        i2c, c2i, EA, PA = self.create_mapping(gridmap, evaders, pursuers)
-        dimensions = [len(actions) for actions in EA] + [len(actions) for actions in PA]
-        N = len(i2c)
-        values = np.zeros(N)
-        Q = np.zeros(shape=dimensions)
-
-
-
-
-
-
-        return values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i
-
-    def value_iteration_policy(self, gridmap, evaders, pursuers):
-        """
-        Method to calculate the value-iteration policy action
-
-        Parameters
-        ----------
-        gridmap: GridMap
-            Map of the environment
-        evaders: list((int,int))
-            list of coordinates of evaders in the game (except the player's robots, if he is evader)
-        pursuers: list((int,int))
-            list of coordinates of pursuers in the game (except the player's robots, if he is pursuer)
-        """
-        self.next_robots = self.robots[:]
-
-        # if there are not precalculated values for policy
-        if not self.loaded_policy:
-            policy_file = Path("policies/" + self.game_name + ".policy")
-            ###################################################
-            # if there is policy file, load it...
-            ###################################################
-            if policy_file.is_file():
-                # load the strategy file
-                self.loaded_policy = pickle.load(open(policy_file, 'rb'))
-                ###################################################
-            # ...else calculate the policy
-            ###################################################
-            else:
-                values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i = self.compute_vi(gridmap, evaders, pursuers)
-
-                self.loaded_policy = (values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i)
-
-                pickle.dump(self.loaded_policy, open(policy_file, 'wb'))
-
-        values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i = self.loaded_policy
-
-        if self.role == PURSUER:
-            state = (mapping_c2i[evaders[0]], mapping_c2i[self.robots[0]], mapping_c2i[self.robots[1]])
-        else:
-            state = (mapping_c2i[self.robots[0]], mapping_c2i[pursuers[0]], mapping_c2i[pursuers[1]])
-
-        if self.role == PURSUER:
-            action_index = np.random.choice(tuple(range(len(pursuer_policy[state][0]))), p=pursuer_policy[state][1])
-            action = pursuer_policy[state][0][action_index]
-            self.next_robots[0] = mapping_i2c[action[0]]
-            self.next_robots[1] = mapping_i2c[action[1]]
-        else:
-            action_index = np.random.choice(tuple(range(len(evader_policy[state][0]))), p=evader_policy[state][1])
-            action = evader_policy[state][0][action_index]
-            self.next_robots[0] = mapping_i2c[action]
-            #####################################################
-
     def __init__(self, robots, role, policy=GREEDY, color='r', epsilon=1,
                  timeout=5.0, game_name=None):
         """ constructor of the Player class
@@ -336,3 +204,190 @@ class Player:
                     evader_policy[(a, b, c)] = self.random_policy(coord_state, gridmap, mapping_c2i, EVADER)
                     pursuer_policy[(a, b, c)] = self.random_policy(coord_state, gridmap, mapping_c2i, PURSUER)
         return values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i
+
+    def reward(self, state, next_state):
+        e, p1, p2 = next_state
+        # direct catch
+        if e == p1 or e == p2:
+            return 1
+        prev_e, prev_p1, prev_p2 = state
+        # crossing catch
+        if prev_e == p1 and prev_p1 == e:
+            return 1
+        if prev_e == p2 and prev_p2 == e:
+            return 1
+        return 0
+
+
+    def compute_vi(self, workload):
+        values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i = workload
+        ctr = 0
+        games = {}
+        old_values = values + 1
+        epsilon = 1e-4
+        diff = abs(old_values - values) > epsilon
+        while diff.any():
+            old_values = copy.copy(values)
+            ctr += 1
+            print(ctr)
+            for state in np.ndindex(values.shape):
+                # # only statues with difference in value > epsilon
+                # if not diff[state]:
+                #     continue
+                Q = {}
+                for evader_action in evader_policy[state][0]:
+                    for pursuer_action in pursuer_policy[state][0]:
+                        next_state = evader_action, pursuer_action[0], pursuer_action[1]
+                        reward = self.reward(state, next_state)
+                        Q[next_state] = reward + (1 - reward) * GAMMA * values[next_state]
+                matrix = compute_game_matrix(Q)
+                games[state] = matrix
+                game_value, _ = compute_nash(matrix)
+                values[state] = game_value
+            diff = abs(old_values - values) > epsilon
+
+        for state in np.ndindex(values.shape):
+            matrix = games[state]
+            pursuer_strategy = maximin(matrix)
+            evader_strategy = maximin(matrix.T, minimize=True)
+            evader_policy[state] = evader_policy[state][0], evader_strategy
+            pursuer_policy[state] = pursuer_policy[state][0], pursuer_strategy
+
+        return values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i
+
+    def value_iteration_policy(self, gridmap, evaders, pursuers):
+        """
+        Method to calculate the value-iteration policy action
+
+        Parameters
+        ----------
+        gridmap: GridMap
+            Map of the environment
+        evaders: list((int,int))
+            list of coordinates of evaders in the game (except the player's robots, if he is evader)
+        pursuers: list((int,int))
+            list of coordinates of pursuers in the game (except the player's robots, if he is pursuer)
+        """
+        self.next_robots = self.robots[:]
+
+        # if there are not precalculated values for policy
+        if not self.loaded_policy:
+            policy_file = Path("policies/" + self.game_name + ".policy")
+            ###################################################
+            # if there is policy file, load it...
+            ###################################################
+            if policy_file.is_file():
+                # load the strategy file
+                self.loaded_policy = pickle.load(open(policy_file, 'rb'))
+            ###################################################
+            # ...else calculate the policy
+            ###################################################
+            else:
+                workload = self.compute_random_policy(gridmap)
+                values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i = self.compute_vi(workload)
+                self.loaded_policy = (values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i)
+
+                pickle.dump(self.loaded_policy, open(policy_file, 'wb'))
+
+        values, evader_policy, pursuer_policy, mapping_i2c, mapping_c2i = self.loaded_policy
+
+        if self.role == PURSUER:
+            state = (mapping_c2i[evaders[0]], mapping_c2i[self.robots[0]], mapping_c2i[self.robots[1]])
+        else:
+            state = (mapping_c2i[self.robots[0]], mapping_c2i[pursuers[0]], mapping_c2i[pursuers[1]])
+
+        if self.role == PURSUER:
+            action_index = np.random.choice(tuple(range(len(pursuer_policy[state][0]))), p=pursuer_policy[state][1])
+            action = pursuer_policy[state][0][action_index]
+            self.next_robots[0] = mapping_i2c[action[0]]
+            self.next_robots[1] = mapping_i2c[action[1]]
+        else:
+            action_index = np.random.choice(tuple(range(len(evader_policy[state][0]))), p=evader_policy[state][1])
+            action = evader_policy[state][0][action_index]
+            self.next_robots[0] = mapping_i2c[action]
+            #####################################################
+
+
+def compute_game_matrix(Q):
+    actions = list(Q.keys())
+    e_actions = [a[0] for a in actions]
+    p_actions = [(a[1], a[2]) for a in actions]
+    e_map = {}
+    p_map = {}
+    e_ctr = 0
+    p_ctr = 0
+    for e, p in zip(e_actions, p_actions):
+        if e not in e_map:
+            e_map[e] = e_ctr
+            e_ctr += 1
+        if p not in p_map:
+            p_map[p] = p_ctr
+            p_ctr += 1
+    M = len(p_map)
+    N = len(e_map)
+    matrix = np.zeros((M, N))
+    for e, p in zip(e_actions, p_actions):
+        i = p_map[p]
+        j = e_map[e]
+        matrix[i, j] = Q[(e, p[0], p[1])]
+    return matrix
+
+
+def maximin(matrix, minimize=False):
+    """
+    Method to calculate the value-iteration policy action
+
+    Parameters
+    ----------
+    matrix: n times m array of floats
+        Game utility matrix
+
+    Returns
+    -------
+    value:float
+        computed value of the game
+    strategy:float[n]
+        probability of player 1 playing each action in nash equilibrium
+    """
+    min_val = np.min(matrix)
+    if min_val < 0:
+        matrix = matrix + abs(min_val)
+    # compute Nash Equilibrium
+    model = g.Model()
+    model.setParam("OutputFlag", 0)
+    U = model.addVar(name="U")
+    # M is number of rows
+    # N is number of columns
+    M, N = matrix.shape
+    path_vars = []
+    for i in range(M):
+        path_vars.append(model.addVar(name="Path " + str(i)))
+    if minimize:
+        model.setObjective(U, g.GRB.MINIMIZE)
+        for j in range(N):
+            model.addConstr(g.quicksum(
+                [matrix[i, j] * path_vars[i] for i in range(M)]
+            ) <= U)
+    else:
+        model.setObjective(U, g.GRB.MAXIMIZE)
+        for j in range(N):
+            model.addConstr(g.quicksum(
+                [matrix[i, j] * path_vars[i] for i in range(M)]
+            ) >= U)
+    model.addConstr(g.quicksum(path_vars) == 1)
+    for pv in path_vars:
+        model.addConstr(pv >= 0)
+    model.optimize()
+    if model.status == 4:
+        model.setParam("DualReductions", 0)
+        model.reset()
+        model.optimize()
+    M_strategy = np.array([var.X for var in path_vars])
+    return M_strategy
+
+
+def compute_nash(matrix):
+    M_strategy = maximin(matrix)
+    N_strategy = maximin(matrix.T, minimize=True)
+    value = M_strategy.T @ matrix @ N_strategy
+    return value, M_strategy

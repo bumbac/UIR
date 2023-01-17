@@ -14,8 +14,45 @@ sys.path.append('player')
 import GridMap as gmap
 import Game as gm
 import Player as pl
+from Player import compute_nash
 
 if __name__ == "__main__":
+    matrix = np.array([[0.21], [40.21]])
+    compute_nash(matrix)
+
+    matrix = np.array([[2, -8, -5],
+                       [9, -6, -4],
+                       [-9, 3, 4]])
+    compute_nash(matrix)
+
+    matrix = np.array([[-2., -9., 9.],
+                       [8., 6., - 3.],
+                       [5., 4., -4.]])
+    compute_nash(matrix)
+
+    matrix = np.array(
+        [[-0., - 2.],
+         [-3., - 0.],
+         [-5., - 2.],
+         [6., - 4.],
+         [-3., - 1.],
+         [-7., - 1.],
+         [8., - 3.],
+         [-3., 3.]])
+    compute_nash(matrix)
+
+    matrix = np.array([[0.21, 40.21],
+                       [40.21, 0.21]])
+    compute_nash(matrix)
+
+    matrix = np.array([[0.21, 40.21, 0.37],
+                       [40.21, 0.21, 0.37]])
+    compute_nash(matrix)
+
+    matrix = np.array([[0.21, 40.21, 0.37],
+                       [40.21, 0.21, 0.37],
+                       [0.21, 0.21, 20.37]])
+    compute_nash(matrix)
 
     # define games:
     #  problem/map name 
