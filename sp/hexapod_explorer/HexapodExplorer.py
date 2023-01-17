@@ -14,6 +14,9 @@ from sklearn.cluster import KMeans
 
 from messages import *
 
+MIN_NUM_CELLS_FRONTIER = 4
+MIN_NUM_FRONTIERS = 20 - 1
+
 
 def position_to_coordinates(position, origin, resolution):
     x = (position.x - origin.x) / resolution
@@ -23,42 +26,43 @@ def position_to_coordinates(position, origin, resolution):
 
 
 def find_centroids(data, max_index, grid_map):
-    x_coords = []
-    y_coords = []
+    centroids = []
     for i in range(max_index):
         indices = np.argwhere(data == i+1)
-        x, y = np.sum(indices, axis=0) / len(indices)
-        x_coords.append(x)
-        y_coords.append(y)
+        if len(indices) < MIN_NUM_CELLS_FRONTIER and max_index >= MIN_NUM_FRONTIERS:
+            continue
+        centroids.append(np.mean(indices, axis=0))
     free_edge_centroids = []
     origin_x = grid_map.origin.position.x
     origin_y = grid_map.origin.position.y
-    for y, x in zip(x_coords, y_coords):
-        x_ = x * grid_map.resolution + origin_x
-        y_ = y * grid_map.resolution + origin_y
+    for coord in centroids:
+        x_ = coord[1] * grid_map.resolution + origin_x
+        y_ = coord[0] * grid_map.resolution + origin_y
         free_edge_centroids.append(Pose(position=Vector3(x_, y_, 0)))
     return free_edge_centroids
 
 
 def find_clusters(data, max_index, grid_map, laser_scan):
+    # equation according to the guidelines in UIR
     f = len(data)
-    # D = laser_scan.angle_min
     D = 5
     nr = 1 + round(np.floor(f / D + 0.5))
-    kmeans = KMeans(n_clusters=1)
+    # only finding the centroid
     centroids = []
     for i in range(max_index):
         indices = np.argwhere(data == i + 1)
+        # filtering frontiers which do not hold much information
+        # at the end of the algorithm (small number of frontiers) include all frontiers
+        if len(indices) < MIN_NUM_CELLS_FRONTIER and max_index >= MIN_NUM_FRONTIERS:
+            continue
         j = 0
         while j + nr < len(indices):
             cluster = indices[j:j+nr]
-            model = kmeans.fit(cluster)
-            centroids.append(model.cluster_centers_[0])
+            centroids.append(np.mean(cluster, axis=0))
             j += nr
         if j < len(indices):
             cluster = indices[j:]
-            model = kmeans.fit(cluster)
-            centroids.append(model.cluster_centers_[0])
+            centroids.append(np.mean(cluster, axis=0))
     multiple_representative_centroids = []
     origin_x = grid_map.origin.position.x
     origin_y = grid_map.origin.position.y
@@ -199,9 +203,11 @@ class HexapodExplorer:
         if grid_map is None:
             return grid_map
         grid_map_grow = copy.deepcopy(grid_map)
+        # mask of obstacles and unknown areas
         occupied_mask = np.ma.masked_where(grid_map_grow.data >= .5, grid_map_grow.data).mask
         edt_a = ndimage.distance_transform_edt(~occupied_mask)
-        proximity_mask = np.ma.masked_where(edt_a < (robot_size/grid_map.resolution), edt_a).mask
+        # mask of distances to obstacle or uknown area lesser than robot_size
+        proximity_mask = np.ma.masked_where(edt_a < (robot_size / grid_map.resolution), edt_a).mask
         grid_map_grow.data = np.bitwise_or(proximity_mask, occupied_mask)
         return grid_map_grow
 
@@ -350,6 +356,8 @@ class HexapodExplorer:
         return False, fallback_node[1].get_Path(resolution=grid_map.resolution), fallback_node[1].price
 
     def relax_goal_accessibility(self, grid_map, path):
+        # iterate the path from goal to start
+        # until first free cell is found make the occupied cell as free
         it = len(path.poses) - 1
         while it > -1:
             pos = path.poses[it]
@@ -379,6 +387,7 @@ class HexapodExplorer:
         it = 0
         delta = 1
         new_path = [p[it]]
+        # create a path of accessible cells to the goal
         grid_map = self.relax_goal_accessibility(grid_map, path)
         while True:
             if it + delta >= limit:
@@ -437,10 +446,11 @@ class HexapodExplorer:
         labeled_image, num_labels = skm.label(res, connectivity=2, return_num=True)
         if num_labels < 1:
             return None
-
         if multiple:
+            # assignment F2
             return find_clusters(labeled_image, num_labels, grid_map, laser_scan)
         else:
+            # assignment F1
             return find_centroids(labeled_image, num_labels, grid_map)
 
     def find_inf_frontiers(self, grid_map):

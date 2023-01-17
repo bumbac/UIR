@@ -180,7 +180,6 @@ class HexapodRobot:
         if cmd == None:
             left = 0
             right = 0
-            print("Reached navigation goal", self.navigation_goal)
             self.navigation_goal = None
         else:
             # translate the velocity command into the differential steering command

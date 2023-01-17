@@ -8,7 +8,7 @@ from messages import *
 DELTA_DISTANCE = 0.2
 C_TURNING_SPEED = 5
 C_AVOID_SPEED = 10
-
+C_LINEAR_SPEED_BOOST = 10
 
 class HexapodController:
     def __init__(self):
@@ -31,10 +31,8 @@ class HexapodController:
                 return None
 
             diff = goal.position - odometry.pose.position
-            dist_to_goal = diff.norm()
-            # print(dist_to_goal)
 
-            if dist_to_goal < DELTA_DISTANCE:
+            if diff.norm() < DELTA_DISTANCE:
                 return None
             goal_h = np.arctan2(diff.y, diff.x)
             # print(goal_h)
@@ -44,7 +42,7 @@ class HexapodController:
             # magic
             diff_h = (diff_h + math.pi) % (2*math.pi) - math.pi
 
-            cmd_msg.linear.x = dist_to_goal
+            cmd_msg.linear.x = C_LINEAR_SPEED_BOOST*diff.norm()
             cmd_msg.angular.z = C_TURNING_SPEED*diff_h
 
         return cmd_msg
@@ -65,21 +63,18 @@ class HexapodController:
         if (goal is not None) and (odometry is not None) and (collision is not None) and (laser_scan is not None):
             cmd_msg = self.goto(goal=goal, odometry=odometry, collision=collision)
             if cmd_msg is None:
-                return cmd_msg
+                return None
             diff = goal.position - odometry.pose.position
-            linear_speed = diff.norm()
-            if linear_speed <= DELTA_DISTANCE:
+            if diff.norm() <= DELTA_DISTANCE:
                 return None
             goal_h = np.arctan2(diff.y, diff.x)
             robot_h = odometry.pose.orientation.to_Euler()[0]
             dphi = goal_h - robot_h
             dphi = (dphi + math.pi) % (2 * math.pi) - math.pi
 
-
             l = len(laser_scan.distances)
             left_points = laser_scan.distances[:l//2]
             right_points = laser_scan.distances[l//2:]
-
             # scan_left = min(left_points)
             # scan_right = min(right_points)
             # repulsive_force = 0
@@ -90,11 +85,15 @@ class HexapodController:
             scan_right = [point for i, point in enumerate(right_points) if laser_scan.range_min < point < laser_scan.range_max]
             repulsive_force = 1/min(scan_left) - 1/min(scan_right)
 
+            # mid_points = laser_scan.distances[l//4:3*l//4]
+            # scan_mid = [point for i, point in enumerate(mid_points) if laser_scan.range_min < point < laser_scan.range_max]
+            # mid_repulsion = 1/(min(scan_left) + min(scan_right))/2 - 1/min(scan_mid)
+
             angular_speed_navigation_component = dphi*C_TURNING_SPEED
             angular_speed_avoidance_component = repulsive_force*C_AVOID_SPEED
             angular_speed = angular_speed_avoidance_component + angular_speed_navigation_component
 
-            # cmd_msg.linear.x = linear_speed
+            cmd_msg.linear.x = C_LINEAR_SPEED_BOOST * diff.norm()
             cmd_msg.angular.z = C_TURNING_SPEED * angular_speed
 
         return cmd_msg
