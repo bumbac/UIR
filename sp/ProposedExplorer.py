@@ -52,9 +52,9 @@ class Explorer:
         self.stop = False
         # timing delays
         self.timing = {"mapping": 1,
-                       "planning": 10,
+                       "planning": 20,
                        "trajectory_following": 1,
-                       "graph": 1}
+                       "graph": 5}
 
         """Connecting the simulator
         """
@@ -230,6 +230,8 @@ class Explorer:
         start = self.robot.odometry_.pose
         # select next frontier if path does not exist or distance is too short
         while not path_to_go or dist < CLOSE_RANGE:
+            if frontier_idx >= len(sorted_frontiers):
+                break
             path_to_go, goal, dist = sorted_frontiers[frontier_idx]
             if path_to_go and dist > CLOSE_RANGE:
                 break
@@ -276,6 +278,11 @@ if __name__ == "__main__":
             x = [f.position.x for f in ex0.path_to_go.poses]
             y = [f.position.y for f in ex0.path_to_go.poses]
             ax.plot(x, y, "b.")
+
+        if ex0.trajectory is not None:
+            x = [f.position.x for f in ex0.trajectory.poses]
+            y = [f.position.y for f in ex0.trajectory.poses]
+            ax.plot(x, y, "y*")
 
 
         plt.xlabel('x[m]')

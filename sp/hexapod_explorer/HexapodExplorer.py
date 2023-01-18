@@ -10,18 +10,17 @@ import queue
 import numpy as np
 import scipy.ndimage as ndimage
 import skimage.measure as skm
-from sklearn.cluster import KMeans
 
 from messages import *
 
 MIN_NUM_CELLS_FRONTIER = 4
-MIN_NUM_FRONTIERS = 20 - 1
+MIN_NUM_FRONTIERS = 0
 
 
 def position_to_coordinates(position, origin, resolution):
     x = (position.x - origin.x) / resolution
     y = (position.y - origin.y) / resolution
-    z = (position.z - origin.y) / resolution
+    # z = (position.z - origin.y) / resolution
     return round(x), round(y)#, round(z)
 
 
@@ -212,6 +211,139 @@ class HexapodExplorer:
         return grid_map_grow
 
     def plan_path(self, grid_map, start, goal, robot_size):
+        """ Method to plan the path from start to the goal pose on the grid
+        Args:
+            grid_map: OccupancyGrid - gridmap for obstacle growing
+            start: Pose - robot start pose
+            goal: Pose - robot goal pose
+        Returns:
+            path: Path - path between the start and goal Pose on the map
+        """
+
+        if grid_map is None or start is None or goal is None:
+            return None
+        resolution = grid_map.resolution
+        origin = grid_map.origin.position
+        DIAGONAL_MOVEMENT = np.sqrt(2)
+
+        class Node:
+            def __init__(self, position, goal_position, parent, occupied):
+                self.closed = False
+                self.parent = parent
+                self.position = position
+                self.x, self.y = self.coordinates(position)
+                self.h = self.heuristic(self.coordinates(goal_position))
+                self.price = float("inf")
+                self.occupied = occupied
+
+            def coordinates(self, position):
+                # calculate x, y coordinates from given Vector3 position
+                return round(position.x / resolution + grid_map.width // 2),\
+                       round(position.y / resolution + grid_map.height // 2)
+
+            def calculate_position(self, coordinates=None):
+                # calculate Vector3 position from given coordinates
+                return Vector3(coordinates[0] * resolution + origin.x,
+                               coordinates[1] * resolution + origin.y, 0)
+
+            def heuristic(self, coordinates):
+                x, y = coordinates
+                return np.abs(self.x - x) + np.abs(self.y - y)
+
+            def distance(self, other):
+                dist = np.abs(self.x - other.x) + np.abs(self.y - other.y)
+                if dist > 1:
+                    return DIAGONAL_MOVEMENT
+                return dist
+
+            def norm(self, other):
+                return np.linalg.norm([self.position.x - other.position.x, self.position.y - other.position.y])
+
+            def neighbours(self):
+                width, height = grid_map.width, grid_map.height
+                valid_coords = []
+                for x in [-1, 0, 1]:
+                    for y in [-1, 0, 1]:
+                        if 0 <= self.x + x < width and 0 <= self.y + y < height:
+                            if x == 0 and y == 0:
+                                continue
+                            valid_coords.append((self.x+x, self.y+y))
+                return valid_coords
+
+            def open(self, parent):
+                self.parent = parent
+                if parent is not None:
+                    dist = self.distance(parent)
+                    self.price = parent.price + dist
+
+            def close(self):
+                self.closed = True
+
+            def get_Path(self):
+                path = Path()
+                parent = self
+                while parent is not None:
+                    path.poses.append(Pose(position=parent.position))
+                    parent = parent.parent
+                path.poses = path.poses[::-1]
+                return path
+
+            def __lt__(self, other):
+                return (self.h + self.price) < (other.h + other.price)
+
+        start_node = Node(start.position, goal.position, None, False)
+        goal_node = Node(goal.position, goal.position, None, False)
+        grid = [[] for _ in range(grid_map.width)]
+        for x in range(grid_map.width):
+            for y in range(grid_map.height):
+                position = start_node.calculate_position((x, y))
+                # IMPORTANT, grid_map is row major!
+                node = Node(position, goal.position, None, grid_map.data[y][x])
+                grid[x].append(node)
+
+        # set to free nodes diameter around the robot
+        # which is surely accessible because robot is there
+        diameter = round(robot_size / resolution)
+        for i in range(-diameter, diameter):
+            for j in range(-diameter, diameter):
+                x_ = start_node.x + i
+                y_ = start_node.y + j
+                # check bounds
+                if 0 <= x_ <= grid_map.width:
+                    grid[x_][start_node.y].occupied = False
+                    if 0 <= y_ <= grid_map.height:
+                        grid[x_][y_].occupied = False
+                if 0 <= y_ <= grid_map.height:
+                    grid[start_node.x][y_].occupied = False
+
+        q = queue.PriorityQueue()
+        start_node.price = 0
+        start_node.open(None)
+        q.put(start_node)
+        fallback_node = [float("inf"), None]
+        OBSTACLE_SIZE_LIMIT = 1.5 * robot_size
+        SUCCESS = True
+        FALLBACK = False
+        while not q.empty():
+            current_node = q.get()
+            dist = current_node.norm(goal_node)
+            if dist < fallback_node[0]:
+                fallback_node = [dist, current_node]
+            if dist < OBSTACLE_SIZE_LIMIT:
+                return SUCCESS, current_node.get_Path(), current_node.price * resolution
+            for coord in current_node.neighbours():
+                x, y = coord
+                other_node = grid[x][y]
+                if not other_node.occupied:
+                    if not other_node.closed:
+                        distance = current_node.distance(other_node)
+                        if (current_node.price + distance) < other_node.price:
+                            other_node.open(current_node)
+                            q.put(other_node)
+        # fallback
+        return FALLBACK, fallback_node[1].get_Path(), fallback_node[1].price * resolution
+
+    def plan_path2(self, grid_map, start, goal, robot_size):
         """ Method to plan the path from start to the goal pose on the grid
         Args:
             grid_map: OccupancyGrid - gridmap for obstacle growing
