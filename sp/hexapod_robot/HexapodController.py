@@ -5,10 +5,10 @@ import math
 import numpy as np
 from messages import *
 
-DELTA_DISTANCE = 0.2
+DELTA_DISTANCE = 0.12
 C_TURNING_SPEED = 5
 C_AVOID_SPEED = 10
-C_LINEAR_SPEED_BOOST = 10
+C_LINEAR_SPEED_BOOST = 5
 
 class HexapodController:
     def __init__(self):

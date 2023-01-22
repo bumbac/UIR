@@ -11,6 +11,8 @@ import numpy as np
 import scipy.ndimage as ndimage
 import skimage.measure as skm
 
+from sklearn.cluster import KMeans
+
 from messages import *
 
 MIN_NUM_CELLS_FRONTIER = 4
@@ -18,57 +20,59 @@ MIN_NUM_FRONTIERS = 0
 
 
 def position_to_coordinates(position, origin, resolution):
+    # calculate discretized X, Y coordinates from 3D position
     x = (position.x - origin.x) / resolution
     y = (position.y - origin.y) / resolution
     # z = (position.z - origin.y) / resolution
     return round(x), round(y)#, round(z)
 
 
+def coordinates_to_position(coordinates, origin, resolution):
+    # calculate 3D position from discretized coordinates
+    x = coordinates[0] * resolution + origin.x
+    y = coordinates[1] * resolution + origin.y
+    z = 0
+    return Vector3(x, y, z)
+
+
 def find_centroids(data, max_index, grid_map):
+    # find centroid of all points in one frontier
     centroids = []
     for i in range(max_index):
         indices = np.argwhere(data == i+1)
-        if len(indices) < MIN_NUM_CELLS_FRONTIER and max_index >= MIN_NUM_FRONTIERS:
+        if len(indices) < MIN_NUM_CELLS_FRONTIER:
             continue
         centroids.append(np.mean(indices, axis=0))
     free_edge_centroids = []
-    origin_x = grid_map.origin.position.x
-    origin_y = grid_map.origin.position.y
     for coord in centroids:
-        x_ = coord[1] * grid_map.resolution + origin_x
-        y_ = coord[0] * grid_map.resolution + origin_y
-        free_edge_centroids.append(Pose(position=Vector3(x_, y_, 0)))
+        position = coordinates_to_position((coord[1], coord[0]), grid_map.origin.position,
+                                           grid_map.resolution)
+        free_edge_centroids.append(Pose(position=position))
     return free_edge_centroids
 
 
 def find_clusters(data, max_index, grid_map, laser_scan):
     # equation according to the guidelines in UIR
     f = len(data)
-    D = 5
+    D = laser_scan.range_max / grid_map.resolution
     nr = 1 + round(np.floor(f / D + 0.5))
     # only finding the centroid
     centroids = []
+    model = KMeans(n_clusters=nr)
     for i in range(max_index):
+        # cell indices in the grow obstacles grid
         indices = np.argwhere(data == i + 1)
-        # filtering frontiers which do not hold much information
-        # at the end of the algorithm (small number of frontiers) include all frontiers
-        if len(indices) < MIN_NUM_CELLS_FRONTIER and max_index >= MIN_NUM_FRONTIERS:
+        # filter frontiers which are located in noisy area (only MIN_NUM_CELLS_FRONTIER in cluster)
+        if len(indices) < MIN_NUM_CELLS_FRONTIER:
             continue
-        j = 0
-        while j + nr < len(indices):
-            cluster = indices[j:j+nr]
-            centroids.append(np.mean(cluster, axis=0))
-            j += nr
-        if j < len(indices):
-            cluster = indices[j:]
-            centroids.append(np.mean(cluster, axis=0))
+        model.fit(indices)
+        centroids.extend(model.cluster_centers_)
     multiple_representative_centroids = []
-    origin_x = grid_map.origin.position.x
-    origin_y = grid_map.origin.position.y
     for coord in centroids:
-        x_ = coord[1] * grid_map.resolution + origin_x
-        y_ = coord[0] * grid_map.resolution + origin_y
-        multiple_representative_centroids.append(Pose(position=Vector3(x_, y_, 0)))
+        # convert centroids in gridmap coordinates to position in 3D
+        position = coordinates_to_position((coord[1], coord[0]), grid_map.origin.position,
+                                           grid_map.resolution)
+        multiple_representative_centroids.append(Pose(position=position))
     return multiple_representative_centroids
 
 
@@ -141,8 +145,6 @@ class HexapodExplorer:
                     x += sx
                     err += dy
                 y += sy
-        x = goal[0]
-        y = goal[1]
         return line
 
     def fuse_laser_scan(self, grid_map, laser_scan, odometry):
@@ -212,6 +214,7 @@ class HexapodExplorer:
 
     def plan_path(self, grid_map, start, goal, robot_size):
         """ Method to plan the path from start to the goal pose on the grid
+            A star with manhattan heuristic
         Args:
             grid_map: OccupancyGrid - gridmap for obstacle growing
             start: Pose - robot start pose
@@ -228,23 +231,13 @@ class HexapodExplorer:
 
         class Node:
             def __init__(self, position, goal_position, parent, occupied):
-                self.closed = False
-                self.parent = parent
                 self.position = position
-                self.x, self.y = self.coordinates(position)
-                self.h = self.heuristic(self.coordinates(goal_position))
+                self.x, self.y = position_to_coordinates(position, origin, resolution)
+                self.h = self.heuristic(position_to_coordinates(goal_position, origin, resolution))
                 self.price = float("inf")
                 self.occupied = occupied
-
-            def coordinates(self, position):
-                # calculate x, y coordinates from given Vector3 position
-                return round(position.x / resolution + grid_map.width // 2),\
-                       round(position.y / resolution + grid_map.height // 2)
-
-            def calculate_position(self, coordinates=None):
-                # calculate Vector3 position from given coordinates
-                return Vector3(coordinates[0] * resolution + origin.x,
-                               coordinates[1] * resolution + origin.y, 0)
+                self.closed = False
+                self.parent = parent
 
             def heuristic(self, coordinates):
                 x, y = coordinates
@@ -296,7 +289,7 @@ class HexapodExplorer:
         grid = [[] for _ in range(grid_map.width)]
         for x in range(grid_map.width):
             for y in range(grid_map.height):
-                position = start_node.calculate_position((x, y))
+                position = coordinates_to_position((x, y), origin, resolution)
                 # IMPORTANT, grid_map is row major!
                 node = Node(position, goal.position, None, grid_map.data[y][x])
                 grid[x].append(node)
@@ -343,159 +336,13 @@ class HexapodExplorer:
         # fallback
         return FALLBACK, fallback_node[1].get_Path(), fallback_node[1].price * resolution
 
-    def plan_path2(self, grid_map, start, goal, robot_size):
-        """ Method to plan the path from start to the goal pose on the grid
-        Args:
-            grid_map: OccupancyGrid - gridmap for obstacle growing
-            start: Pose - robot start pose
-            goal: Pose - robot goal pose
-        Returns:
-            path: Path - path between the start and goal Pose on the map
-        """
-
-        if grid_map is None or start is None or goal is None:
-            return None
-
-        class STATE(enum.Enum):
-            FRESH = 0
-            OPEN = 1
-            CLOSED = 2
-
-            def __repr__(self):
-                if self == STATE.FRESH:
-                    return "FRESH"
-                if self == STATE.OPEN:
-                    return "OPEN"
-                return "CLOSED"
-
-        class Node:
-            def __init__(self, position, goal_position, parent, occupied):
-                self.flag = STATE.FRESH
-                self.parent = parent
-                self.x = position.x
-                self.y = position.y
-                self.h = self.heuristic(goal_position)
-                self.price = float("inf")
-                self.occupied = occupied
-
-            def heuristic(self, other):
-                return np.abs(self.x - other.x) + np.abs(self.y - other.y)
-
-            def norm(self, other):
-                return np.linalg.norm([self.x - other.x, self.y - other.y])
-
-            def neighbours(self, grid_map):
-                width, height = grid_map.width, grid_map.height
-                bottom_x = grid_map.origin.position.x / grid_map.resolution
-                top_x = bottom_x + width
-                bottom_y = grid_map.origin.position.y / grid_map.resolution
-                top_y = bottom_y + height
-
-                valid_coords = []
-                for x in [-1, 0, 1]:
-                    for y in [-1, 0, 1]:
-                        if bottom_x <= self.x + x < top_x and bottom_y <= self.y + y < top_y:
-                            if x == 0 and y == 0:
-                                continue
-                            valid_coords.append((self.x+x, self.y+y))
-                return valid_coords
-
-            def open(self, parent):
-                self.parent = parent
-                self.flag = STATE.OPEN
-                if parent is not None:
-                    if self.heuristic(parent) > 1:
-                        self.price = parent.price + np.sqrt(2)
-                    else:
-                        self.price = parent.price + 1
-
-            def close(self):
-                self.flag = STATE.CLOSED
-
-            def get_Path(self, resolution=0.1):
-                path = Path()
-                path.poses.append(Pose(position=Vector3(self.x * resolution, self.y * resolution, 0)))
-                parent = self.parent
-                while parent is not None:
-                    path.poses.append(Pose(position=Vector3(parent.x * resolution, parent.y * resolution, 0)))
-                    parent = parent.parent
-                path.poses = path.poses[::-1]
-                return path
-
-            def __repr__(self):
-                # return str(self.h)
-                return f"{self.x=}, {self.y=}, {self.flag=}, {self.parent=}, {self.h=}, {self.occupied=}"
-
-            def __eq__(self, other):
-                return self.norm(other) <= (robot_size / grid_map.resolution)
-
-            def same(self, other):
-                return (self.h + self.price) == (other.h + other.price)
-
-            def __lt__(self, other):
-                return (self.h + self.price) < (other.h + other.price)
-
-        start_coordinates = Vector3(round(start.position.x / grid_map.resolution),
-                                    round(start.position.y / grid_map.resolution), 0)
-        goal_coordinates = Vector3(round(goal.position.x / grid_map.resolution),
-                                   round(goal.position.y / grid_map.resolution), 0)
-        start_node = Node(start_coordinates, goal_coordinates, None, False)
-        goal_node = Node(goal_coordinates, goal_coordinates, None, False)
-        grid = [[] for _ in range(grid_map.width)]
-        for x in range(grid_map.width):
-            for y in range(grid_map.height):
-                coordinates = Vector3(
-                    round(grid_map.origin.position.x / grid_map.resolution + x),
-                    round(grid_map.origin.position.y / grid_map.resolution + y), 0)
-                # IMPORTANT, grid_map is row major!
-                node = Node(coordinates, goal.position, None, grid_map.data[y][x])
-                grid[x].append(node)
-
-        start_x = round(start.position.x / grid_map.resolution + grid_map.width // 2)
-        start_y = round(start.position.y / grid_map.resolution + grid_map.height // 2)
-        diameter = round(robot_size / grid_map.resolution)
-        for i in range(-diameter, diameter):
-            for j in range(-diameter, diameter):
-                grid[start_x+i][start_y].occupied = False
-                grid[start_x + i][start_y + j].occupied = False
-                grid[start_x][start_y + j].occupied = False
-
-        goal_x = goal.position.x / grid_map.resolution + grid_map.width // 2
-        goal_y = goal.position.y / grid_map.resolution + grid_map.height // 2
-        goal_occupied = grid[round(goal_x)][round(goal_y)]
-        q = queue.PriorityQueue()
-        start_node.price = 0
-        start_node.open(None)
-        q.put(start_node)
-        fallback_node = [float("inf"), None]
-        OBSTACLE_SIZE_LIMIT = 1.5 * robot_size / grid_map.resolution
-        while not q.empty():
-            current_node = q.get()
-            if current_node.norm(goal_node) < fallback_node[0]:
-                fallback_node = [current_node.norm(goal_node), current_node]
-            if current_node.norm(goal_node) < OBSTACLE_SIZE_LIMIT and goal_occupied:
-                return True, current_node.get_Path(resolution=grid_map.resolution), current_node.price
-            for coord in current_node.neighbours(grid_map):
-                x, y = round(coord[0]) + (grid_map.width // 2), round(coord[1]) + (grid_map.height // 2)
-                other_node = grid[x][y]
-                if not other_node.occupied:
-                    if other_node.flag != STATE.CLOSED:
-                        distance = current_node.norm(other_node)
-                        if (current_node.price + distance) < other_node.price:
-                            other_node.open(current_node)
-                            q.put(other_node)
-        # fallback
-        return False, fallback_node[1].get_Path(resolution=grid_map.resolution), fallback_node[1].price
-
     def relax_goal_accessibility(self, grid_map, path):
         # iterate the path from goal to start
         # until first free cell is found make the occupied cell as free
         it = len(path.poses) - 1
         while it > -1:
             pos = path.poses[it]
-            pos = pos.position
-            x = round(pos.x / grid_map.resolution + grid_map.width // 2)
-            y = round(pos.y / grid_map.resolution + grid_map.height // 2)
+            x, y = position_to_coordinates(pos.position, grid_map.origin.position, grid_map.resolution)
             if grid_map.data[y][x]:
                 grid_map.data[y][x] = False
             it -= 1
@@ -521,62 +368,86 @@ class HexapodExplorer:
         new_path = [p[it]]
         # create a path of accessible cells to the goal
         grid_map = self.relax_goal_accessibility(grid_map, path)
+        # iterate the raycast until an obstacle is found
         while True:
             if it + delta >= limit:
                 break
             else:
-                start = (p[it].position.x / grid_map.resolution, p[it].position.y / grid_map.resolution)
-                start = round(start[0]), round(start[1])
-                goal = (p[it+delta].position.x / grid_map.resolution, p[it+delta].position.y / grid_map.resolution)
-                goal = round(goal[0]), round(goal[1])
+                start = position_to_coordinates(p[it].position, grid_map.origin.position, grid_map.resolution)
+                goal = position_to_coordinates(p[it+delta].position, grid_map.origin.position, grid_map.resolution)
                 line = self.bresenham_line(start, goal)
                 obstacle = False
                 for i, point in enumerate(line):
                     # IMPORTANT, inverted x and y
-                    y, x = round(point[0]) + (grid_map.height // 2), round(point[1]) + (grid_map.width // 2)
-                    # occupied
+                    y, x = round(point[0]), round(point[1])
                     if grid_map.data[x][y]:
+                        # occupied
+                        # do not use the raycast from the it position
+                        # iterate one cell further and raycast again
                         obstacle = True
                         new_path.append(p[it+delta-1])
                         it += delta - 1
                         delta = 1
                         break
                 if not obstacle:
+                    # you can raycast because no obstacle was found in it
                     delta += 1
         new_path.append(p[-1])
         path.poses = new_path
-        return path
+        dist = 0
+        prev_pose = path.poses[0]
+        for pose in path.poses:
+            dist += np.linalg.norm([pose.position.x - prev_pose.position.x,
+            pose.position.y - prev_pose.position.y])
+            prev_pose = pose
+
+        return path, dist
 
     def find_free_edge_frontiers(self, grid_map, laser_scan, multiple=True):
         """Method to find the free-edge frontiers (edge clusters between the free and unknown areas)
         Args:
             grid_map: OccupancyGrid - gridmap of the environment
             laser_scan: Laser Scan - many variables
+            multiple: bool - calculate multiple-representative free-edge cluster frontiers (f2 assignment)
         Returns:
             pose_list: Pose[] - list of selected frontiers
         """
         if not grid_map or not laser_scan:
             return None
 
+        # detection mask for unoccupied cell with at least one unoccupied neighbour cell
         a = -1
+        # center value
         c = 10
         mask = np.array([[a] * 3, [a, c, a], [a] * 3])
         data = np.reshape(copy.deepcopy(grid_map.data), (grid_map.height, grid_map.width))
+        # mask unoccupied cells as true
         free_mask = (data < 0.5) * 1
+        # calculate value using mask
         free_free = ndimage.convolve(free_mask, mask, mode='constant', cval=0.0)
+        # cells with value > 1 are unoccupied in the center
         down_limit = (free_free > 1)
+        # cells with value < 10 have at least one unoccupied neighbour cell
         up_limit = (free_free < 10)
+        # if center cell is unoccupied and has at least one unoccupied neighbour cell accept it
+        # as free cell (not yet frontier)
         free_free = np.bitwise_and(down_limit, up_limit)
+
+        # detection mask for unknown cells in the neighbourhood
         a = 1
         c = 0
         mask = np.array([[a] * 3, [a, c, a], [a] * 3])
         data = np.reshape(copy.deepcopy(grid_map.data), (grid_map.height, grid_map.width))
         unknown_mask = (data == 0.5) * 1
         any_unknown = ndimage.convolve(unknown_mask, mask, mode='constant', cval=0.0)
+        # at least one unknown cell in the neighbourhood
         any_unknown = (any_unknown > 0)
+        # cell which is unoccupied in the middle and has at least one unoccupied and one uknown cell
+        # in the neighbourhood
         res = np.bitwise_and(any_unknown, free_free)
         labeled_image, num_labels = skm.label(res, connectivity=2, return_num=True)
         if num_labels < 1:
+            # did not find any frontiers
             return None
         if multiple:
             # assignment F2
@@ -584,36 +455,3 @@ class HexapodExplorer:
         else:
             # assignment F1
             return find_centroids(labeled_image, num_labels, grid_map)
-
-    def find_inf_frontiers(self, grid_map):
-        """Method to find the frontiers based on information theory approach
-        Args:
-            grid_map: OccupancyGrid - gridmap of the environment
-        Returns:
-            pose_list: Pose[] - list of selected frontiers
-        """
-
-        #TODO:[t1e_expl] find the information rich points in the environment
-        return None
-
-    ###########################################################################
-    #INCREMENTAL Planner
-    ###########################################################################
-
-    def plan_path_incremental(self, grid_map, start, goal):
-        """ Method to plan the path from start to the goal pose on the grid
-        Args:
-            grid_map: OccupancyGrid - gridmap for obstacle growing
-            start: Pose - robot start pose
-            goal: Pose - robot goal pose
-        Returns:
-            path: Path - path between the start and goal Pose on the map
-        """
-
-        if not hasattr(self, 'rhs'): #first run of the function
-            self.rhs = np.full((grid_map.height, grid_map.width), np.inf)
-            self.g = np.full((grid_map.height, grid_map.width), np.inf)
-
-        #TODO:[t1x-dstar] plan the incremental path between the start and the goal Pose
- 
-        return self.plan_path(grid_map, start, goal), self.rhs.flatten(), self.g.flatten()
